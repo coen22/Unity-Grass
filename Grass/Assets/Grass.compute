@@ -86,8 +86,12 @@ float4 _Time;
 
 //float4 _ProjectionParams;
 
-Texture2D HeightMap; 
+Texture2D HeightMap;
 SamplerState samplerHeightMap;
+
+Texture2D SplatMask;
+SamplerState samplerSplatMask;
+float _SplatCutoff;
 
 Texture2D ClumpTex; 
 SamplerState my_point_repeat_sampler;
@@ -239,6 +243,13 @@ void Main (uint3 id : SV_DispatchThreadID)
         float2 jitter = ((hash*2)-1 ) * _JitterStrength;
 
         position.xz += jitter;
+
+        float2 maskUV = position.xz * (1/_HeightMapScale.xx);
+        float maskVal = SplatMask.SampleLevel(samplerSplatMask, maskUV, 0).x;
+        if(maskVal < _SplatCutoff)
+        {
+            return;
+        }
 
         float2 clumpUV = position.xz * float2(_ClumpScale.xx);
 
