@@ -1,6 +1,7 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Linq;
 using UnityEditor;
 using UnityEngine;
 
@@ -12,7 +13,7 @@ public class Grass : MonoBehaviour
     ComputeShader computeShader;
     [SerializeField]
     Material material;
-    public GameObject plane;
+    List<Terrain> terrainPatches = new List<Terrain>();
     public Camera cam;
     public Mesh originalMesh;
  
@@ -20,9 +21,10 @@ public class Grass : MonoBehaviour
     [SerializeField, Range(10, 4000)]
     int resolution = 10;
     public float jitterStrength;
-    public Texture heightMap;
-    public float _HeightMapScale;
-    public float _HeightMapMultiplier;
+    [Header("Terrain splatmap settings")]
+    public List<int> grassSplatmapIndices = new List<int>();
+    [Range(0,1)]
+    public float splatCutoff = 0.5f;
 
     [Header("Wind")]
     public Texture WindTex;
@@ -55,6 +57,8 @@ public class Grass : MonoBehaviour
     ComputeBuffer meshPositions;
     ComputeBuffer meshColors;
     ComputeBuffer meshUvs;
+
+    List<Texture2D> splatMasks = new List<Texture2D>();
 
     ComputeBuffer argsBuffer;
 
@@ -114,6 +118,8 @@ public class Grass : MonoBehaviour
         planeCentreId = Shader.PropertyToID("_PlaneCentre"),
         jitterStrengthId = Shader.PropertyToID("_JitterStrength"),
         heightMapId = Shader.PropertyToID("HeightMap"),
+        splatMaskId = Shader.PropertyToID("SplatMask"),
+        splatCutoffId = Shader.PropertyToID("_SplatCutoff"),
 
         distanceCullStartDistId = Shader.PropertyToID("_DistanceCullStartDist"),
         distanceCullEndDistId = Shader.PropertyToID("_DistanceCullEndDist"),
@@ -152,8 +158,6 @@ public class Grass : MonoBehaviour
     
     
 
-    float GrassSpacing;
-    Vector3 PlaneCentre;
     
 
     
@@ -179,6 +183,8 @@ public class Grass : MonoBehaviour
         //computeShader.SetFloat("_Test3", _Test3);
         //computeShader.SetFloat("_Test4", _Test4);
         computeShader.SetFloat(DistanceCullMinimumGrassAmountlID, _DistanceCullMinimumGrassAmount);
+
+        // Terrain specific parameters will be set per patch
 
 
         computeShader.SetVector(TimeID, Shader.GetGlobalVector("_Time"));
@@ -210,8 +216,37 @@ public class Grass : MonoBehaviour
         computeShader.SetFloat(ClumpScaleID, ClumpScale);
 
 
-        int groups = Mathf.CeilToInt(resolution / 8f);
-        computeShader.Dispatch(0, groups, groups, 1);
+        foreach (var (terrain, index) in terrainPatches.Select((t, i) => (t, i)))
+        {
+            if (terrain == null) continue;
+
+            Vector3 planeDims = terrain.terrainData.size;
+            Texture heightTex = terrain.terrainData.heightmapTexture;
+
+            float spacing = planeDims.x / resolution;
+            Vector3 centre = planeDims / 2f - new Vector3(terrain.transform.position.x, 0, terrain.transform.position.z);
+
+            computeShader.SetInt(resolutionId, resolution);
+            computeShader.SetFloat(grassSpacingId, spacing);
+            computeShader.SetFloat(jitterStrengthId, jitterStrength);
+            computeShader.SetVector(planeCentreId, centre);
+            computeShader.SetTexture(0, heightMapId, heightTex);
+            computeShader.SetFloat("_HeightMapScale", planeDims.x);
+            computeShader.SetFloat("_HeightMapMultiplier", planeDims.y);
+
+            if (index < splatMasks.Count && splatMasks[index] != null)
+            {
+                computeShader.SetTexture(0, splatMaskId, splatMasks[index]);
+                computeShader.SetFloat(splatCutoffId, splatCutoff);
+            }
+            else
+            {
+                computeShader.SetTexture(0, splatMaskId, null);
+            }
+
+            int groups = Mathf.CeilToInt(resolution / 8f);
+            computeShader.Dispatch(0, groups, groups, 1);
+        }
 
         
 
@@ -227,6 +262,7 @@ public class Grass : MonoBehaviour
     void Awake()
     {
         //cam.depthTextureMode = DepthTextureMode.Depth;
+        terrainPatches = FindObjectsOfType<Terrain>().ToList();
         numInstances = resolution * resolution;
         grassBladesBuffer = new ComputeBuffer(resolution * resolution, sizeof(float) * 18, ComputeBufferType.Append);
         grassBladesBuffer.SetCounterValue(0);
@@ -361,26 +397,13 @@ public class Grass : MonoBehaviour
 
     
 
-        Bounds planeBounds = plane.GetComponent<Renderer>().bounds;
-
-        Vector3 planeDims = planeBounds.size;
-
-        float planeArea = planeDims.x * planeDims.z;
-
-
-        GrassSpacing = planeDims.x / resolution;
-
-        PlaneCentre = new Vector3(planeDims.x / 2, 0, planeDims.z / 2);
-
-        computeShader.SetInt(resolutionId, resolution);
-        computeShader.SetFloat(grassSpacingId, GrassSpacing);
-        computeShader.SetFloat(jitterStrengthId, jitterStrength);
-        computeShader.SetVector(planeCentreId, PlaneCentre);
-        computeShader.SetTexture(0, heightMapId, heightMap);
-        computeShader.SetBuffer(0, grassBladesBufferID, grassBladesBuffer);
-
-        computeShader.SetFloat("_HeightMapScale", _HeightMapScale);
-        computeShader.SetFloat("_HeightMapMultiplier", _HeightMapMultiplier);
+        foreach (var t in terrainPatches)
+        {
+            if (t != null)
+            {
+                splatMasks.Add(CreateSplatMask(t.terrainData));
+            }
+        }
 
         computeShader.SetTexture(0, windTexID, WindTex);
 
@@ -438,8 +461,35 @@ public class Grass : MonoBehaviour
     UpdateGPUParams();
 
         //Graphics.DrawProcedural(material, bounds, MeshTopology.Triangles, meshTriangles.count, numInstances);
-        Graphics.DrawProceduralIndirect(material, bounds, MeshTopology.Triangles, argsBuffer, 
+        Graphics.DrawProceduralIndirect(material, bounds, MeshTopology.Triangles, argsBuffer,
             0, null, null, UnityEngine.Rendering.ShadowCastingMode.Off, true, gameObject.layer);
+    }
+
+    Texture2D CreateSplatMask(TerrainData data)
+    {
+        if (grassSplatmapIndices == null || grassSplatmapIndices.Count == 0)
+            return null;
+
+        int w = data.alphamapWidth;
+        int h = data.alphamapHeight;
+        float[,,] maps = data.GetAlphamaps(0, 0, w, h);
+        Texture2D mask = new Texture2D(w, h, TextureFormat.RFloat, false, true);
+        mask.wrapMode = TextureWrapMode.Clamp;
+        for (int y = 0; y < h; y++)
+        {
+            for (int x = 0; x < w; x++)
+            {
+                float sum = 0f;
+                foreach (int idx in grassSplatmapIndices)
+                {
+                    if (idx < maps.GetLength(2))
+                        sum += maps[y, x, idx];
+                }
+                mask.SetPixel(x, y, new Color(sum, 0, 0, 1));
+            }
+        }
+        mask.Apply();
+        return mask;
     }
 
     void OnDestroy()
@@ -452,6 +502,13 @@ public class Grass : MonoBehaviour
         meshColors.Dispose();
         meshUvs.Dispose();
         argsBuffer.Dispose();
+        foreach (var mask in splatMasks)
+        {
+            if (mask != null)
+            {
+                Destroy(mask);
+            }
+        }
     }
 }
 
